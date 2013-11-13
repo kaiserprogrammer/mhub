@@ -8,6 +8,6 @@ Test: Use of Micro Services as the dominant architecture.
 
 Start Zookeeper & Kafka
 
-Usecases:
-Write IRC Message
-Publish received Messages
+### Usecases:
+#### Write IRC Message
+#### Publish received Messages
