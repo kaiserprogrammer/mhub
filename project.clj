@@ -7,4 +7,5 @@
                  [irclj "0.5.0-alpha3"]
                  [clj-kafka "0.1.0-0.8-beta1"]
                  [com.yammer.metrics/metrics-core "2.2.0"]
-                 [com.101tec/zkclient "0.3"]])
+                 [com.101tec/zkclient "0.3"]
+                 [metrics-clojure "1.0.1"]])

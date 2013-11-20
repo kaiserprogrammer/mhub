@@ -2,7 +2,12 @@
   (:require irclj.core)
   (:require [clj-kafka.consumer.zk :as kafka.c])
   (:require [clj-kafka.producer :as kafka.p])
-  (:require [clojure.data.json :as json]))
+  (:require [clojure.data.json :as json])
+  (:use [metrics.gauges :only [gauge]])
+  (:use [metrics.core :only [report-to-console]])
+  (:use [metrics.meters :only [meter mark!]])
+  (:use [metrics.histograms :only [histogram update!]])
+  (:use [metrics.timers :only [timer time!]]))
 
 (def config {"zookeeper.connect" "localhost:2181"
              "group.id" "mhub"
@@ -17,7 +22,15 @@
                      :bus config
                      :consumer (atom nil)
                      :producer (atom nil)
-                     :message-writer (atom nil)})
+                     :message-writer (atom nil)
+                     :messages-sent (atom 0)
+                     :messages-received (atom 0)
+                     :message-meter-received (meter "message-received" "messages")
+                     :message-meter-sent (meter "message-sent" "messages")
+                     :message-size-histo-received (histogram "message-length-received")
+                     :message-size-histo-sent (histogram "message-length-sent")
+                     :message-received-timer (timer "message-received-time")
+                     :message-sent-timer (timer "message-sent-time")})
 
 (defn start-message-bus [system]
   (swap! (:producer system)
@@ -33,19 +46,27 @@
 
 (defn log-message [system irc msg]
   (try
-    (kafka.p/send-message @(:producer system) (kafka.p/message "received" (.getBytes (json/json-str {:message msg}))))
+    (time! (:message-received-timer system)
+     (kafka.p/send-message @(:producer system) (kafka.p/message "received" (.getBytes (json/json-str {:message msg}))))
+     (gauge "messages-received" (swap! (:messages-received system) inc))
+     (mark! (:message-meter-received system))
+     (metrics.histograms/update! (:message-size-histo-received system) (count (:text msg))))
     (catch Exception e (println (.getMessage e))))
   "")
 
 (defn start-irc [system]
-  (let [irc (irclj.core/connect (:host system) (:port system) (:name system) :callbacks {:raw-log irclj.events/stdout-callback :privmsg (partial log-message system)})]
+  (let [irc (irclj.core/connect (:host system) (:port system) (:name system) :callbacks {:raw-log irclj.events/stdout-callback :privmsg (fn [irc msg] (log-message system irc msg))})]
     (dosync
      (alter (:irc system) #(identity %2) irc)))
   (when @(:ready? @@(:irc system))
     (irclj.core/join (deref (:irc system)) (:channel system))))
 
 (defn send-irc-message [system message]
-  (irclj.core/message (deref (:irc system)) (:channel system) message))
+  (time! (:message-sent-timer system)
+         (irclj.core/message (deref (:irc system)) (:channel system) message)
+         (gauge "messages-sent" (swap! (:messages-sent system) inc))
+         (mark! (:message-meter-sent system))
+         (update! (:message-size-histo-sent system) (count message))))
 
 (defn stop-irc [system]
   (irclj.core/quit (deref (:irc system)))
