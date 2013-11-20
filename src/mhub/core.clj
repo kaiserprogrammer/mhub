@@ -12,80 +12,80 @@
 (def config {"zookeeper.connect" "localhost:2181"
              "group.id" "mhub"
              "auto.offset.reset" "smallest"
-             "auto.commit.enable" "false"})
+             "auto.commit.enable" "true"})
 
-(defn dev-system [] {:host "irc.freenode.net"
-                     :port 6667
-                     :channel "##pace"
-                     :name "mhub-test"
-                     :irc (ref nil)
-                     :bus config
-                     :consumer (atom nil)
-                     :producer (atom nil)
-                     :message-writer (atom nil)
-                     :messages-sent (atom 0)
-                     :messages-received (atom 0)
-                     :message-meter-received (meter "message-received" "messages")
-                     :message-meter-sent (meter "message-sent" "messages")
-                     :message-size-histo-received (histogram "message-length-received")
-                     :message-size-histo-sent (histogram "message-length-sent")
-                     :message-received-timer (timer "message-received-time")
-                     :message-sent-timer (timer "message-sent-time")})
+(defn dev-system [] (atom
+                     {:host "irc.freenode.net"
+                      :port 6667
+                      :channel "##pace"
+                      :name "mhub-test"
+                      :irc nil
+                      :bus config
+                      :consumer nil
+                      :producer nil
+                      :message-writer nil
+                      :messages-sent (atom 0)
+                      :messages-received (atom 0)
+                      :message-meter-received (meter "message-received" "messages")
+                      :message-meter-sent (meter "message-sent" "messages")
+                      :message-size-histo-received (histogram "message-length-received")
+                      :message-size-histo-sent (histogram "message-length-sent")
+                      :message-received-timer (timer "message-received-time")
+                      :message-sent-timer (timer "message-sent-time")}))
 
-(defn start-message-bus [system]
-  (swap! (:producer system)
-         (fn [_] (kafka.p/producer {"metadata.broker.list" "localhost:9092"})))
-  (swap! (:consumer system)
-         (fn [_] (kafka.c/consumer (:bus system)))))
+(defn start-message-bus [sys]
+  (swap! sys assoc :producer
+         (kafka.p/producer {"metadata.broker.list" "localhost:9092"}))
+  (swap! sys assoc :consumer
+         (kafka.c/consumer (:bus @sys))))
 
-(defn stop-message-bus [system]
-  (swap! (:producer system)
-         (fn [p] (when p (.close p)) nil))
-  (swap! (:consumer system)
-         (fn [c] (when c (kafka.c/shutdown c)) nil)))
+(defn stop-message-bus [sys]
+  (let [p (:producer @sys)]
+    (when p (.close p)))
+  (let [c (:consumer @sys)]
+    (when c (kafka.c/shutdown c))))
 
 (defn log-message [system irc msg]
   (try
     (time! (:message-received-timer system)
-     (kafka.p/send-message @(:producer system) (kafka.p/message "received" (.getBytes (json/json-str {:message msg}))))
-     (gauge "messages-received" (swap! (:messages-received system) inc))
-     (mark! (:message-meter-received system))
-     (metrics.histograms/update! (:message-size-histo-received system) (count (:text msg))))
+           (kafka.p/send-message (:producer system) (kafka.p/message "received" (.getBytes (json/json-str {:message msg}))))
+           (gauge "messages-received" (swap! (:messages-received system) inc))
+           (mark! (:message-meter-received system))
+           (metrics.histograms/update! (:message-size-histo-received system) (count (:text msg))))
     (catch Exception e (println (.getMessage e))))
   "")
 
-(defn start-irc [system]
-  (let [irc (irclj.core/connect (:host system) (:port system) (:name system) :callbacks {:raw-log irclj.events/stdout-callback :privmsg (fn [irc msg] (log-message system irc msg))})]
-    (dosync
-     (alter (:irc system) #(identity %2) irc)))
-  (when @(:ready? @@(:irc system))
-    (irclj.core/join (deref (:irc system)) (:channel system))))
+(defn start-irc [sys]
+  (let [system @sys]
+    (let [irc (irclj.core/connect (:host system) (:port system) (:name system) :callbacks {:raw-log irclj.events/stdout-callback :privmsg (fn [irc msg] (log-message system irc msg))})]
+      (swap! sys assoc :irc irc))
+    (when @(:ready?
+            @(:irc @sys))
+      (irclj.core/join (:irc @sys) (:channel system)))))
 
 (defn send-irc-message [system message]
   (time! (:message-sent-timer system)
-         (irclj.core/message (deref (:irc system)) (:channel system) message)
+         (irclj.core/message (:irc system) (:channel system) message)
          (gauge "messages-sent" (swap! (:messages-sent system) inc))
          (mark! (:message-meter-sent system))
          (update! (:message-size-histo-sent system) (count message))))
 
-(defn stop-irc [system]
-  (irclj.core/quit (deref (:irc system)))
-  (irclj.core/kill (deref (:irc system))))
+(defn stop-irc [sys]
+  (when (:irc @sys)
+    (irclj.core/quit (:irc @sys))
+    (irclj.core/kill (:irc @sys))))
 
-(defn start-message-writer [system]
-  (swap! (:message-writer system)
-         (fn [_]
-           (future
-             (doall
-              (for [msg (kafka.c/messages @(:consumer system) ["send"])]
-                (send-irc-message system (String. (:value msg) "UTF-8"))))))))
+(defn start-message-writer [sys]
+  (swap! sys assoc :message-writer
+         (future
+           (doall
+            (for [msg (kafka.c/messages (:consumer @sys) ["send"])]
+              (send-irc-message @sys (String. (:value msg) "UTF-8")))))))
 
-(defn stop-message-writer [system]
-  (swap! (:message-writer system)
-         (fn [f]
-           (when f
-             (future-cancel f))
-           nil)))
+(defn stop-message-writer [sys]
+  (let [f (:message-writer @sys)]
+    (when f
+      (future-cancel f))))
 
 (defn start [system]
   (start-message-bus system)
